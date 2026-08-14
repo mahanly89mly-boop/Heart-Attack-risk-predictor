@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Heart Disease Risk API — Monitoring</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1117;
+    --card: #171a23;
+    --border: #262b3a;
+    --text: #e6e8ef;
+    --muted: #8b93a7;
+    --accent: #5b8def;
+    --low: #34c38f;
+    --medium: #f1b44c;
+    --high: #f46a6a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px;
+  }
+  h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); margin: 0 0 24px; font-size: 0.9rem; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 14px;
+    margin-bottom: 24px;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px 18px;
+  }
+  .card .label { color: var(--muted); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; }
+  .card .value { font-size: 1.7rem; font-weight: 700; margin-top: 6px; }
+  .charts { display: grid; grid-template-columns: 2fr 1fr; gap: 14px; margin-bottom: 24px; }
+  @media (max-width: 800px) { .charts { grid-template-columns: 1fr; } }
+  .chart-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+  .chart-card h3 { margin: 0 0 12px; font-size: 0.95rem; color: var(--text); }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 0.75rem; text-transform: uppercase; }
+  .badge { padding: 2px 8px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
+  .badge.low { background: rgba(52,195,143,0.15); color: var(--low); }
+  .badge.medium { background: rgba(241,180,76,0.15); color: var(--medium); }
+  .badge.high { background: rgba(244,106,106,0.15); color: var(--high); }
+  .footer { color: var(--muted); font-size: 0.75rem; margin-top: 16px; }
+  .refresh { color: var(--accent); cursor: pointer; font-size: 0.8rem; }
+</style>
+</head>
+<body>
+  <h1>Heart Disease Risk API — Monitoring</h1>
+  <p class="subtitle">Live view of prediction volume, risk distribution, and latency. Auto-refreshes every 15s. <span class="refresh" onclick="loadAll()">Refresh now</span></p>
+
+  <div class="grid" id="summary-cards"></div>
+
+  <div class="charts">
+    <div class="chart-card">
+      <h3>Predictions per hour (last 24h)</h3>
+      <canvas id="timeseriesChart" height="110"></canvas>
+    </div>
+    <div class="chart-card">
+      <h3>Risk distribution</h3>
+      <canvas id="riskChart" height="110"></canvas>
+    </div>
+  </div>
+
+  <div class="chart-card">
+    <h3>Recent predictions</h3>
+    <table>
+      <thead>
+        <tr><th>Time (UTC)</th><th>Risk</th><th>Probability</th><th>Prediction</th><th>Latency (ms)</th></tr>
+      </thead>
+      <tbody id="recent-table-body"></tbody>
+    </table>
+  </div>
+
+  <p class="footer">Data source: SQLite prediction log via /stats and /recent-predictions. Model version shown in /health.</p>
+
+<script>
+let timeseriesChart, riskChart;
+
+async function fetchJSON(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("Request failed: " + url);
+  return res.json();
+}
+
+function summaryCard(label, value) {
+  return `<div class="card"><div class="label">${label}</div><div class="value">${value}</div></div>`;
+}
+
+function renderSummary(stats) {
+  const el = document.getElementById("summary-cards");
+  el.innerHTML = [
+    summaryCard("Total predictions", stats.total_predictions),
+    summaryCard("Positive rate", (stats.positive_rate * 100).toFixed(1) + "%"),
+    summaryCard("Avg risk probability", stats.avg_risk_probability.toFixed(3)),
+    summaryCard("Avg latency", stats.avg_latency_ms.toFixed(1) + " ms"),
+    summaryCard("Last 24h", stats.predictions_last_24h),
+  ].join("");
+}
+
+function renderTimeseries(stats) {
+  const ctx = document.getElementById("timeseriesChart");
+  const labels = stats.timeseries.map(p => p.hour.slice(-2) + ":00");
+  const counts = stats.timeseries.map(p => p.count);
+  if (timeseriesChart) timeseriesChart.destroy();
+  timeseriesChart = new Chart(ctx, {
+    type: "line",
+    data: { labels, datasets: [{ label: "Predictions", data: counts, borderColor: "#5b8def", backgroundColor: "rgba(91,141,239,0.15)", fill: true, tension: 0.3 }] },
+    options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: "#8b93a7" } }, y: { ticks: { color: "#8b93a7" }, beginAtZero: true } } }
+  });
+}
+
+function renderRisk(stats) {
+  const ctx = document.getElementById("riskChart");
+  const dist = stats.risk_distribution;
+  if (riskChart) riskChart.destroy();
+  riskChart = new Chart(ctx, {
+    type: "doughnut",
+    data: {
+      labels: ["Low", "Medium", "High"],
+      datasets: [{ data: [dist.low || 0, dist.medium || 0, dist.high || 0], backgroundColor: ["#34c38f", "#f1b44c", "#f46a6a"] }]
+    },
+    options: { plugins: { legend: { position: "bottom", labels: { color: "#e6e8ef" } } } }
+  });
+}
+
+function renderRecent(rows) {
+  const tbody = document.getElementById("recent-table-body");
+  tbody.innerHTML = rows.map(r => `
+    <tr>
+      <td>${new Date(r.created_at).toLocaleString()}</td>
+      <td><span class="badge ${r.risk_label}">${r.risk_label}</span></td>
+      <td>${r.risk_probability.toFixed(3)}</td>
+      <td>${r.prediction}</td>
+      <td>${r.latency_ms.toFixed(1)}</td>
+    </tr>
+  `).join("");
+}
+
+async function loadAll() {
+  try {
+    const [stats, recent] = await Promise.all([
+      fetchJSON("/stats"),
+      fetchJSON("/recent-predictions?limit=20"),
+    ]);
+    renderSummary(stats);
+    renderTimeseries(stats);
+    renderRisk(stats);
+    renderRecent(recent);
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+loadAll();
+setInterval(loadAll, 15000);
+</script>
+</body>
+</html>
