@@ -1,4 +1,4 @@
-# Heart Disease Risk Prediction API
+# Heart Disease Risk Prediction
 
 A production-style machine learning service that estimates a patient's
 probability of heart disease from 25 clinical and lifestyle features,
